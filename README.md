@@ -15,7 +15,7 @@ Drop a PDF onto emdee and it will:
 ### How to use it
 
 **Option 1 — Open directly (no install needed)**
-1. Download this repository as a zip (click the green **Code** button → **Download ZIP**)
+1. Download this repository as a zip (click the green **Code** button at the top → **Download ZIP**)
 2. Unzip it
 3. Open `index.html` in Chrome or Safari
 
