@@ -33,7 +33,7 @@
                 </div>
                 <div>
                     <h1>emdee</h1>
-                    <span class="subtitle">Document Intelligence</span>
+                    <span class="subtitle">Document Intelligence <span class="version-badge" id="version-badge"></span></span>
                 </div>
             </div>
 
@@ -53,10 +53,34 @@
                 </div>
             </div>
 
+            <!-- Export Options -->
+            <div class="config-section">
+                <h3>Export Options</h3>
+                <div class="control-group">
+                    <label class="checkbox-control">
+                        <input type="checkbox" id="page-numbers-check">
+                        <span>Include page numbers</span>
+                    </label>
+                    <span class="control-desc">Inserts "Page X" before each page's content in the export</span>
+                </div>
+            </div>
+
+            <!-- Global Action Buttons -->
+            <div class="actions-section">
+                <button id="export-btn" class="btn btn-primary" disabled>
+                    <svg viewBox="0 0 24 24" width="18" height="18" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                        <polyline points="7 10 12 15 17 10"></polyline>
+                        <line x1="12" y1="15" x2="12" y2="3"></line>
+                    </svg>
+                    Export Markdown Package
+                </button>
+            </div>
+
             <!-- Configuration / Sliders -->
             <div class="config-section">
                 <h3>Layout Parameters</h3>
-                
+
                 <div class="control-group">
                     <div class="control-label">
                         <span>Column Separation</span>
@@ -120,18 +144,6 @@
                         <span id="stat-images" class="stat-value">-</span>
                     </div>
                 </div>
-            </div>
-
-            <!-- Global Action Buttons -->
-            <div class="actions-section">
-                <button id="export-btn" class="btn btn-primary" disabled>
-                    <svg viewBox="0 0 24 24" width="18" height="18" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round">
-                        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
-                        <polyline points="7 10 12 15 17 10"></polyline>
-                        <line x1="12" y1="15" x2="12" y2="3"></line>
-                    </svg>
-                    Export Markdown Package
-                </button>
             </div>
         </aside>
 

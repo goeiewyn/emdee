@@ -97,6 +97,39 @@ h1, h2, h3, h4 {
     font-weight: 500;
 }
 
+/* --- Version Badge --- */
+.version-badge {
+    background: rgba(99, 102, 241, 0.15);
+    color: #a5b4fc;
+    padding: 1px 6px;
+    border-radius: 4px;
+    font-size: 0.65rem;
+    font-family: var(--font-mono);
+    letter-spacing: 0.05em;
+    text-transform: none;
+    vertical-align: middle;
+}
+
+/* --- Checkbox Control --- */
+.checkbox-control {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 0.8rem;
+    font-weight: 500;
+    color: var(--text-secondary);
+    cursor: pointer;
+    user-select: none;
+}
+
+.checkbox-control input[type="checkbox"] {
+    width: 14px;
+    height: 14px;
+    accent-color: var(--primary-color);
+    cursor: pointer;
+    flex-shrink: 0;
+}
+
 /* --- Drag & Drop Zone --- */
 .upload-section {
     width: 100%;

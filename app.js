@@ -1,3 +1,5 @@
+const APP_VERSION = '0.5.1';
+
 // Initialize PDF.js
 const pdfjsLib = window['pdfjs-dist/build/pdf'];
 pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.4.120/pdf.worker.min.js';
@@ -9,6 +11,9 @@ let totalPages = 0;
 let pdfFileName = 'document';
 let activeTab = 'preview';
 let currentZip = null; // reset per-document load
+
+// Export option flags
+let includePageNumbers = false;
 
 // Configuration parameters
 let colSepThreshold = 40;
@@ -54,6 +59,13 @@ const markdownTextarea = document.getElementById('markdown-textarea');
 const exportBtn        = document.getElementById('export-btn');
 const copyMdBtn        = document.getElementById('copy-md-btn');
 const docInfoPanel     = document.getElementById('document-info');
+
+// --- Initialisation ---
+
+document.getElementById('version-badge').textContent = `v${APP_VERSION}`;
+document.getElementById('page-numbers-check').addEventListener('change', (e) => {
+    includePageNumbers = e.target.checked;
+});
 
 // --- Event Listeners ---
 
@@ -170,7 +182,7 @@ async function loadPage(pageNum) {
     showToast(`Parsing page ${pageNum}…`, 'info');
 
     if (parsedPagesCache[pageNum]) {
-        renderPageFromCache(pageNum);
+        await renderPageFromCache(pageNum);
     } else {
         await parseAndRenderPage(pageNum);
     }
@@ -273,10 +285,18 @@ async function parseAndRenderPage(pageNum) {
     }
 }
 
-function renderPageFromCache(pageNum) {
+async function renderPageFromCache(pageNum) {
     const cached = parsedPagesCache[pageNum];
     if (!cached) return;
 
+    // Re-render the PDF page onto the canvas so the visual pane matches the page
+    const page     = await pdfDoc.getPage(pageNum);
+    const viewport = page.getViewport({ scale: 1.5 });
+    pdfCanvas.width  = viewport.width;
+    pdfCanvas.height = viewport.height;
+    await page.render({ canvasContext: pdfCanvas.getContext('2d'), viewport }).promise;
+
+    visualOverlay.setAttribute('viewBox', `0 0 ${viewport.width} ${viewport.height}`);
     visualOverlay.innerHTML = '';
     drawOverlayHighlights(cached.elements);
 
@@ -312,8 +332,8 @@ function processTextFragments(items, viewport) {
 
         // Extract font name to help detect bold/italic
         const fontName = (item.fontName || '').toLowerCase();
-        const isBold   = /bold|heavy|black/.test(fontName);
-        const isItalic = /italic|oblique/.test(fontName);
+        const isBold   = /bold|heavy|black|semibold|demibold/i.test(fontName);
+        const isItalic = /italic|oblique/i.test(fontName);
 
         blocks.push({
             str:      item.str,
@@ -345,7 +365,11 @@ function mergeInlineFragments(blocks) {
         const sameLine = Math.abs(current.y - next.y) < 3;
         const gap = next.x - current.right;
 
-        if (sameLine && gap < 8) {
+        // List markers ("1.", "2.", "●", etc.) are often separated from their text by a wide
+        // tab stop in Google Docs PDFs. Allow a larger merge gap for these fragments.
+        const isListMarker = /^(\d+\.|[●•·▼▸►◦‣□○])$/.test(current.str.trim());
+        const mergeGap = isListMarker ? 60 : 8;
+        if (sameLine && gap < mergeGap) {
             current.str    += (gap > 1.5 ? ' ' : '') + next.str;
             current.width   = next.right - current.x;
             current.right   = next.right;
@@ -456,9 +480,16 @@ function detectTables(blocks) {
     lines.push(currentLine);
     lines.forEach(line => line.sort((a, b) => a.x - b.x));
 
+    const BULLET_CHARS = ['•', '·', '▼', '▸', '►', '◦', '‣', '□', '○', '●', '–', '—'];
     const tableRowCandidates = [];
     lines.forEach(line => {
         if (line.length >= 2) {
+            // Skip list items — a leading bullet or short marker fragment is not a table cell
+            const firstStr = line[0].str.trim();
+            const isBulletLine = BULLET_CHARS.some(b => firstStr === b || firstStr.startsWith(b + ' '))
+                || /^[•·▼▸►◦‣□○●]/.test(firstStr);
+            if (isBulletLine) return;
+
             for (let i = 1; i < line.length; i++) {
                 if (line[i].x - line[i - 1].right > 15) {
                     tableRowCandidates.push(line);
@@ -510,7 +541,11 @@ function compilePageElements(blocks, columns, tables, images, pageWidth) {
             block.y >= t.y && block.bottom <= t.bottom
         );
         if (inTable) return false;
+        // Only suppress text inside raster images, not vector-path bounding boxes.
+        // Vector bounding boxes are approximate hulls of path clusters (card backgrounds,
+        // table shading, decorative borders) — they routinely contain real heading text.
         const inImage = images.some(img =>
+            !img.isVector &&
             block.x >= img.x - 3 && block.right <= img.right + 3 &&
             block.y >= img.y - 3 && block.bottom <= img.bottom + 3
         );
@@ -554,6 +589,7 @@ function compilePageElements(blocks, columns, tables, images, pageWidth) {
         x: img.x, y: img.y, width: img.width, height: img.height,
         right: img.right, bottom: img.bottom,
         imageIndex: idx,
+        isVector: img.isVector,
         column: 0
     }));
 
@@ -626,7 +662,9 @@ async function extractImagePositions(page, operatorList, viewport) {
         }
     }
 
-    // Cluster vector path points into chart/diagram bounding boxes
+    // Cluster vector path points into chart/diagram bounding boxes.
+    // Only treat a cluster as an image if it has enough points and a reasonable
+    // aspect ratio — thin/flat shapes are decorative lines or table shading, not charts.
     const vectorGraphics = [];
     if (pathPoints.length >= 10) {
         const pts = [...pathPoints].sort((a, b) => a.y - b.y);
@@ -634,7 +672,8 @@ async function extractImagePositions(page, operatorList, viewport) {
         const groups = [];
 
         for (let j = 1; j < pts.length; j++) {
-            if (pts[j].y - currentGroup[currentGroup.length - 1].y < 80) {
+            // Tighter Y-gap (40px vs 80px) avoids merging separate card/section backgrounds
+            if (pts[j].y - currentGroup[currentGroup.length - 1].y < 40) {
                 currentGroup.push(pts[j]);
             } else {
                 groups.push(currentGroup);
@@ -644,13 +683,14 @@ async function extractImagePositions(page, operatorList, viewport) {
         groups.push(currentGroup);
 
         groups.forEach(group => {
-            if (group.length < 15) return;
+            if (group.length < 20) return; // require more points — simple borders have far fewer
             const minX = Math.min(...group.map(p => p.x));
             const maxX = Math.max(...group.map(p => p.x));
             const minY = Math.min(...group.map(p => p.y));
             const maxY = Math.max(...group.map(p => p.y));
             const w = maxX - minX, h = maxY - minY;
-            if (w > 50 && h > 50 && w < viewport.width * 0.95 && h < viewport.height * 0.95) {
+            // Require minimum height of 60px and aspect ratio ≤ 8:1 to skip thin horizontal rules
+            if (w > 50 && h > 60 && w / h <= 8 && w < viewport.width * 0.95 && h < viewport.height * 0.95) {
                 vectorGraphics.push({
                     x: Math.max(0, minX - 10), y: Math.max(0, minY - 10),
                     width:  Math.min(viewport.width - minX,  w + 20),
@@ -692,6 +732,11 @@ async function cropPageImages(pageCanvas, imagePositions) {
     const croppedFiles = [];
     for (let i = 0; i < imagePositions.length; i++) {
         const pos = imagePositions[i];
+        // Skip vector-detected regions — they're decorative backgrounds, not exportable images
+        if (pos.isVector) {
+            croppedFiles.push({ index: i, dataUrl: null, boundingBox: pos });
+            continue;
+        }
         try {
             const cropCanvas = document.createElement('canvas');
             cropCanvas.width  = Math.ceil(pos.width  * imgCropScale);
@@ -730,24 +775,38 @@ function drawOverlayHighlights(elements) {
 
 // --- Markdown Generation ---
 
-// Compute a median font size from all text elements to calibrate heading thresholds dynamically
+// Compute font size stats to calibrate heading thresholds dynamically.
+// `body` is the modal size of the lower 60% of elements — the true body text anchor,
+// unaffected by decorative large elements (badge numbers, pull quotes) that skew p75.
 function computeFontStats(elements) {
     const sizes = elements
         .filter(e => e.type === 'text')
         .map(e => e.fontSize)
         .sort((a, b) => a - b);
-    if (sizes.length === 0) return { median: 12, p75: 14 };
+    if (sizes.length === 0) return { median: 12, p75: 14, body: 10 };
     const median = sizes[Math.floor(sizes.length / 2)];
     const p75    = sizes[Math.floor(sizes.length * 0.75)];
-    return { median, p75 };
+
+    const lowerSlice = sizes.slice(0, Math.ceil(sizes.length * 0.6));
+    const freq = {};
+    lowerSlice.forEach(s => {
+        const key = Math.round(s * 2) / 2; // bucket to nearest 0.5pt
+        freq[key] = (freq[key] || 0) + 1;
+    });
+    const body = parseFloat(Object.entries(freq).sort((a, b) => b[1] - a[1])[0][0]);
+
+    return { median, p75, body };
 }
 
 function generatePageMarkdown(elements, images, pageNum) {
-    const { median, p75 } = computeFontStats(elements);
+    const { median, p75, body } = computeFontStats(elements);
 
-    // Heading thresholds relative to page's own font distribution
-    const h1Threshold = Math.max(p75 * 1.35, median * 1.8);
-    const h2Threshold = Math.max(p75 * 1.10, median * 1.4);
+    // Anchor thresholds to body text size (modal of lower distribution),
+    // so decorative large elements (badge numbers, pull quotes) don't inflate p75
+    // and push heading thresholds above the actual headings.
+    const base = body || median;
+    const h1Threshold = Math.max(base * 1.9, p75 * 1.25);
+    const h2Threshold = Math.max(base * 1.3,  p75 * 1.02);
 
     let markdown = `<!-- Page ${pageNum} -->\n\n`;
 
@@ -758,24 +817,80 @@ function generatePageMarkdown(elements, images, pageNum) {
         if (el.type === 'text') {
             const text = el.isBold ? `**${el.str}**` : (el.isItalic ? `*${el.str}*` : el.str);
 
-            if (el.fontSize >= h1Threshold) {
+            // Numbered subsection pattern (e.g. "2.1 Campaign Settings") → always H2
+            const isNumberedSub = /^\d+\.\d+\s/.test(el.str);
+
+            // Minimum string length guards: single-char badge numbers ("1","2") must not become headings
+            const longEnough = el.str.trim().length >= 3;
+
+            if (el.fontSize >= h1Threshold && longEnough) {
                 markdown += `\n# ${el.str}\n\n`;
-            } else if (el.fontSize >= h2Threshold || (el.isBold && el.fontSize > median)) {
+            } else if (longEnough && (
+                el.fontSize >= h2Threshold ||
+                (el.isBold && el.fontSize > base * 1.1) ||
+                isNumberedSub
+            )) {
                 markdown += `\n## ${el.str}\n\n`;
             } else {
-                markdown += text + ' ';
-                if (!next || next.type !== 'text' || Math.abs(next.y - el.y) > 24) {
-                    markdown += '\n\n';
+                const trimmed = el.str.trim();
+                // Bullet list item: starts with a bullet character
+                const LIST_BULLET_RE = /^[●•·▼▸►◦‣□○]/;
+                // Numbered list item: starts with "N. text" — requires space+non-space after dot
+                // to avoid false matches on decimals ("1.5") or mid-sentence refs ("Figure 1.")
+                const LIST_NUMBERED_RE = /^\d+\.\s+\S/;
+
+                if (LIST_BULLET_RE.test(trimmed)) {
+                    // Split in case multiple bullet items were merged into one block
+                    const parts = trimmed.split(/\s+(?=[●•·▼▸►◦‣□○])/);
+                    parts.forEach(part => {
+                        const content = part.replace(/^[●•·▼▸►◦‣□○]\s*/, '').trim();
+                        if (content) markdown += '\n- ' + content + '\n';
+                    });
+                } else if (LIST_NUMBERED_RE.test(trimmed)) {
+                    // Split in case multiple numbered items were merged into one block
+                    const parts = trimmed.split(/\s+(?=\d+\.\s)/);
+                    if (parts.length > 1) {
+                        parts.forEach(part => { if (part.trim()) markdown += '\n' + part.trim() + '\n'; });
+                    } else {
+                        markdown += '\n' + trimmed + '\n';
+                    }
+                } else {
+                    markdown += text + ' ';
+                    if (!next || next.type !== 'text' || Math.abs(next.y - el.y) > 24) {
+                        markdown += '\n\n';
+                    }
                 }
             }
         } else if (el.type === 'table') {
             markdown += '\n\n' + formatTableToMarkdown(el.tableData) + '\n\n';
-        } else if (el.type === 'image') {
+        } else if (el.type === 'image' && !el.isVector) {
             markdown += `\n\n![Image extracted from page ${pageNum}](images/image_${pageNum}_${el.imageIndex}.png)\n\n`;
         }
     }
 
     return markdown.replace(/\n{3,}/g, '\n\n').trim();
+}
+
+// Merge continuation rows caused by PDF cell-wrapping.
+// A row is a continuation when most cells are empty (≤30% filled) AND at least
+// one non-empty cell lines up with a non-empty cell in the row above.
+function mergeWrappedRows(grid, colCount) {
+    if (colCount === 0) return grid;
+    const merged = [];
+    for (const row of grid) {
+        const nonEmpty = row.filter(c => c !== '').length;
+        const isSparse  = nonEmpty > 0 && nonEmpty / colCount <= 0.3;
+        if (merged.length > 0 && isSparse) {
+            const prev = merged[merged.length - 1];
+            const continuesFromPrev = row.some((c, i) => c !== '' && prev[i] !== '');
+            if (continuesFromPrev) {
+                row.forEach((c, i) => { if (c !== '') prev[i] = prev[i] + ' ' + c; });
+                continue;
+            }
+        }
+        merged.push([...row]);
+    }
+    return merged;
 }
 
 function formatTableToMarkdown(table) {
@@ -798,7 +913,7 @@ function formatTableToMarkdown(table) {
     const colCount = colLefts.length;
     if (colCount === 0) return '';
 
-    const grid = rows.map(row => {
+    const rawGrid = rows.map(row => {
         const gridRow = new Array(colCount).fill('');
         row.forEach(cell => {
             let best = 0, minDiff = Infinity;
@@ -811,6 +926,8 @@ function formatTableToMarkdown(table) {
         return gridRow;
     });
 
+    const grid = mergeWrappedRows(rawGrid, colCount);
+
     let md = '';
     md += '| ' + grid[0].join(' | ') + ' |\n';
     md += '| ' + new Array(colCount).fill('---').join(' | ') + ' |\n';
@@ -820,6 +937,60 @@ function formatTableToMarkdown(table) {
     return md;
 }
 
+// --- Header / Footer Detection ---
+
+// Returns a Set of text strings that appear repeatedly in the top/bottom margins
+// across enough pages to be considered structural chrome (headers/footers).
+// Matches bare page numbers in footer/header zones: "3", "Page 3", "3 of 10", "- 3 -", "3 / 10"
+const PAGE_NUMBER_RE = /^(-\s*)?\d+(\s*[-\/]\s*\d+)?(\s*-)?$|^[Pp]age\s+\d+(\s+of\s+\d+)?$|^\d+\s+of\s+\d+$/;
+
+function detectHeaderFooterTexts() {
+    if (totalPages < 2) return new Set();
+
+    const textCount = {};
+    const pageNumKeys = new Set();
+
+    for (let p = 1; p <= totalPages; p++) {
+        const cached = parsedPagesCache[p];
+        if (!cached) continue;
+
+        const textEls = cached.elements.filter(e => e.type === 'text');
+        if (!textEls.length) continue;
+
+        const minY     = Math.min(...textEls.map(e => e.y));
+        const maxY     = Math.max(...textEls.map(e => e.bottom));
+        const span     = maxY - minY;
+        if (span <= 0) continue;
+
+        const headerLimit = minY + span * 0.07;
+        const footerLimit = maxY - span * 0.07;
+
+        const seenThisPage = new Set();
+        textEls.forEach(el => {
+            const inMargin = el.bottom <= headerLimit || el.y >= footerLimit;
+            if (!inMargin) return;
+            const key = el.str.trim();
+            if (!key) return;
+            // Page-number patterns: unique per page but still chrome — collect separately
+            if (PAGE_NUMBER_RE.test(key)) {
+                pageNumKeys.add(key);
+                return;
+            }
+            if (key.length < 4 || seenThisPage.has(key)) return;
+            seenThisPage.add(key);
+            textCount[key] = (textCount[key] || 0) + 1;
+        });
+    }
+
+    // Threshold: appears on at least 40% of pages (min 2)
+    const threshold = Math.max(2, Math.ceil(totalPages * 0.4));
+    const frequencyMatches = Object.entries(textCount)
+        .filter(([, n]) => n >= threshold)
+        .map(([text]) => text);
+
+    return new Set([...frequencyMatches, ...pageNumKeys]);
+}
+
 // --- Export ---
 
 async function exportMarkdownPackage() {
@@ -827,13 +998,33 @@ async function exportMarkdownPackage() {
     showToast('Compiling export package…', 'info');
 
     try {
-        currentZip = new JSZip(); // ensure clean zip
+        currentZip = new JSZip();
+
+        // Parse all pages first so header/footer detection has full data
+        for (let p = 1; p <= totalPages; p++) {
+            if (!parsedPagesCache[p]) await parseAndRenderPage(p);
+        }
+
+        const headerFooterTexts = detectHeaderFooterTexts();
         const mdPages = [];
 
         for (let p = 1; p <= totalPages; p++) {
-            if (!parsedPagesCache[p]) await parseAndRenderPage(p);
             const cached = parsedPagesCache[p];
-            mdPages.push(cached.markdown);
+
+            // Re-generate markdown with header/footer text filtered out
+            const filteredElements = cached.elements.filter(el =>
+                el.type !== 'text' || !headerFooterTexts.has(el.str.trim())
+            );
+            let pageMarkdown = generatePageMarkdown(filteredElements, [], p);
+
+            // Optionally prepend a page number line
+            if (includePageNumbers) {
+                pageMarkdown = `*Page ${p}*\n\n` + pageMarkdown;
+            }
+
+            mdPages.push(pageMarkdown);
+
+            // Add image files to zip
             cached.images.forEach(img => {
                 if (img.dataUrl) {
                     const b64 = img.dataUrl.split(',')[1];
@@ -844,7 +1035,7 @@ async function exportMarkdownPackage() {
 
         const fullMarkdown =
             `# ${pdfFileName}\n\n` +
-            `*Converted on ${new Date().toLocaleDateString()} with emdee*\n\n---\n\n` +
+            `*Converted on ${new Date().toLocaleDateString()} with emdee v${APP_VERSION}*\n\n---\n\n` +
             mdPages.join('\n\n---\n\n');
 
         currentZip.file('document.md', fullMarkdown);
